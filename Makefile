@@ -12,11 +12,11 @@ HASHED_PWD = echo -n $(PASS) | md5sum | head -c 32
 #########
 
 #########
-FILES = test
+FILES = main Tintin_reporter 
 
 SRC = $(addsuffix .c, $(FILES))
 
-vpath %.c srcs inc
+vpath %.cpp srcs inc
 #########
 
 #########
@@ -26,7 +26,7 @@ DEP = $(addsuffix .d, $(basename $(OBJ)))
 #########
 
 #########
-$(OBJ_DIR)/%.o: %.c
+$(OBJ_DIR)/%.o: %.cpp
 	@mkdir -p $(@D)
 	${CC} -MMD $(CFLAGS) -DPWD=\"$(shell $(HASHED_PWD))\" -c -Iinc  $< -o $@
 
