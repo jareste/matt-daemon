@@ -17,8 +17,8 @@
 #include <sys/prctl.h>
 #include <sys/select.h>
 #include <time.h>
+#include <sys/file.h>
 #include "Tintin_reporter.hpp"
-
 
 #define TARGET_PATH "/usr/bin/matt-daemon" 
 #define SERVICE_PATH_SYSTEMD "/etc/systemd/system/matt-daemon.service" 
@@ -34,13 +34,49 @@ available - Shows the number of available connections\n"
 #define PORT 4242
 
 #define MAX_CLIENTS 3
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 4096
 
-sem_t connection_semaphore;
+using milu = Tintin_reporter;
+
+static int server_running = 0;
 
 int use_systemd()
 {
     return access("/run/systemd/system", F_OK) == 0;
+}
+
+int create_lock_file()
+{
+    int lock_fd = open("/var/lock/matt_daemon.lock", O_CREAT | O_RDWR, 0644);
+    if (lock_fd < 0)
+    {
+        perror("Failed to create/open lock file");
+        return -1;
+    }
+
+    if (flock(lock_fd, LOCK_EX | LOCK_NB) != 0)
+    {
+        perror("Error: Another instance of Matt_daemon is already running");
+        milu::log_message("Error: Another instance of Matt_daemon is already running", LOG_ERROR);
+        close(lock_fd);
+        return -1;
+    }
+
+    char pid_str[16];
+    snprintf(pid_str, sizeof(pid_str), "%d\n", getpid());
+
+    char pid_str_str[32];
+    snprintf(pid_str_str, sizeof(pid_str_str), "Starting... PID: %d", getpid());
+    milu::log_message(pid_str_str, LOG_INFO);
+    write(lock_fd, pid_str, strlen(pid_str));
+
+    return lock_fd;
+}
+
+void remove_lock_file(int lock_fd)
+{
+    close(lock_fd);
+    unlink("/var/lock/matt_daemon.lock");
 }
 
 void copy_to_standard_location()
@@ -148,11 +184,13 @@ void setup_service(int systemd_enabled)
     (void)foo;
 }
 
-int setup_server_socket() {
+int setup_server_socket()
+{
     int server_socket;
     struct sockaddr_in server_addr;
 
-    if ((server_socket = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+    if ((server_socket = socket(AF_INET, SOCK_STREAM, 0)) == -1)
+    {
         perror("Socket failed");
         exit(EXIT_FAILURE);
     }
@@ -164,13 +202,15 @@ int setup_server_socket() {
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(PORT);
 
-    if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
+    if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1)
+    {
         perror("Bind failed");
         close(server_socket);
         exit(EXIT_FAILURE);
     }
 
-    if (listen(server_socket, MAX_CLIENTS) == -1) {
+    if (listen(server_socket, MAX_CLIENTS) == -1)
+    {
         perror("Listen failed");
         close(server_socket);
         exit(EXIT_FAILURE);
@@ -179,34 +219,57 @@ int setup_server_socket() {
     return server_socket;
 }
 
-void handle_client_input(int client_socket, Tintin_reporter& logger) {
+void handle_client_input(int* client_socket)
+{
     char buffer[BUFFER_SIZE];
-    int bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
+    int bytes_received = recv(*client_socket, buffer, sizeof(buffer) - 1, 0);
 
-    if (bytes_received <= 0) {
-        if (bytes_received == 0) {
+    if (bytes_received <= 0)
+    {
+        if (bytes_received == 0)
+        {
+            milu::log_message("Connection closed by client.", LOG_INFO);
             printf("Connection closed by client.\n");
-        } else {
+        }
+        else
+        {
             perror("recv");
         }
-        close(client_socket);
+        close(*client_socket);
+        *client_socket = 0;
         return;
     }
 
     buffer[bytes_received - 1] = '\0';
-    logger.log_message(buffer);
 
-    if (strcmp(buffer, "exit") == 0) {
-        close(client_socket);
-    } else if (strcmp(buffer, "?") == 0) {
-        send(client_socket, "Help Menu:\n? - Shows help menu\nexit - Closes the connection\n", 53, 0);
-    } else {
-        send(client_socket, "Command received.\n", 19, 0);
+    if (strcmp(buffer, "quit") == 0)
+    {
+        send(*client_socket, "Stoping service...\n", strlen("Stoping service...\n"), 0);
+        
+        milu::log_message("Service quit requested.", LOG_INFO);
+
+        close(*client_socket);
+        *client_socket = 0;
+        server_running = 0;
+
+        if (use_systemd())
+        {
+            system("systemctl stop matt-daemon");
+        }
+        else
+        {
+            system("service matt-daemon stop");
+        }
+    }
+    else
+    {
+        milu::log_message(buffer, LOG_USER);
+        send(*client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
     }
 }
 
-int daemon_main() {
-    Tintin_reporter logger;
+int daemon_main()
+{
     int server_socket = setup_server_socket();
     fd_set active_fds, read_fds;
     int client_sockets[MAX_CLIENTS] = {0};
@@ -215,33 +278,53 @@ int daemon_main() {
     FD_SET(server_socket, &active_fds);
     int max_fd = server_socket;
 
-    logger.log_message("Daemon started.");
+    int lock_fd = create_lock_file();
+    if (lock_fd < 0)
+    {
+        fprintf(stderr, "Failed to create lock file.\n");
+        milu::log_message("Failed to create lock file. Another instance potentially trying to run.", LOG_ERROR);
+        close(server_socket);
+        return -1;
+    }
+    // milu::log_message("Daemon started.", LOG_INFO);
 
-    while (1) {
+    server_running = 1;
+
+    while (server_running)
+    {
         read_fds = active_fds;
 
-        if (select(max_fd + 1, &read_fds, NULL, NULL, NULL) < 0) {
-            perror("select");
-            break;
+        if (select(max_fd + 1, &read_fds, NULL, NULL, NULL) < 0)
+        {
+            // milu::log_message("Daemon error.", LOG_ERROR);
+            /*
+                We should never close connection, select failed?
+                Unlucky, maybe next time we'll have better luck.
+            */
+            continue;
         }
 
-        if (FD_ISSET(server_socket, &read_fds)) {
+        if (FD_ISSET(server_socket, &read_fds))
+        {
             struct sockaddr_in client_addr;
             socklen_t addrlen = sizeof(client_addr);
             int new_socket = accept(server_socket, (struct sockaddr *)&client_addr, &addrlen);
-            if (new_socket < 0) {
+            if (new_socket < 0)
+            {
                 perror("accept");
                 continue;
             }
 
-            printf("New connection accepted.\n");
-            logger.log_message("New connection accepted.");
+            milu::log_message("New connection accepted.", LOG_INFO);
 
-            for (int i = 0; i < MAX_CLIENTS; i++) {
-                if (client_sockets[i] == 0) {
+            for (int i = 0; i < MAX_CLIENTS; i++)
+            {
+                if (client_sockets[i] == 0)
+                {
                     client_sockets[i] = new_socket;
                     FD_SET(new_socket, &active_fds);
-                    if (new_socket > max_fd) {
+                    if (new_socket > max_fd)
+                    {
                         max_fd = new_socket;
                     }
                     break;
@@ -249,17 +332,32 @@ int daemon_main() {
             }
         }
 
-        for (int i = 0; i < MAX_CLIENTS; i++) {
+        for (int i = 0; i < MAX_CLIENTS; i++)
+        {
             int client_socket = client_sockets[i];
-            if (client_socket > 0 && FD_ISSET(client_socket, &read_fds)) {
-                handle_client_input(client_socket, logger);
-                if (client_socket == 0) {
-                    FD_CLR(client_socket, &active_fds);
+            if (client_socket > 0 && FD_ISSET(client_socket, &read_fds))
+            {
+                handle_client_input(&client_socket);
+                if (client_socket == 0)
+                {
+                    FD_CLR(client_sockets[i], &active_fds);
+                    client_sockets[i] = 0;
                 }
             }
         }
     }
 
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        if (client_sockets[i] > 0)
+        {
+            close(client_sockets[i]);
+        }
+    }
+
+    milu::log_message("Daemon stopped.", LOG_INFO);
+
+    remove_lock_file(lock_fd);
     close(server_socket);
     return 0;
 }
@@ -296,6 +394,20 @@ int main()
         daemon_main();
         return 0;
     }
+
+
+    int lock_fd = create_lock_file();
+    if (lock_fd < 0)
+    {
+        fprintf(stderr, "Failed to create lock file.\n");
+        /* NOT AN ERROR!!
+            We are not in the service execution path.
+        */
+        return 0;
+    }
+    /*it's free so just remove it.*/
+    remove_lock_file(lock_fd);
+
 
     if (access(TARGET_PATH, F_OK) != 0)
     {
