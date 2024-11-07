@@ -36,7 +36,6 @@ all:
 $(NAME): $(OBJ) Makefile
 	$(CC) $(CFLAGS) $(OBJ) -o $(NAME) $(LDFLAGS)
 	@echo "EVERYTHING DONE  "
-	@echo "PWD: $(PASS) HASHED_PWD: $(shell $(HASHED_PWD))"
 
 release: CFLAGS = $(RELEASE_CFLAGS)
 release: re

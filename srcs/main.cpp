@@ -44,11 +44,6 @@ static int server_running = 0;
 static int is_encrypted = 0;
 static int g_log_num = 1;
 
-#include <stdio.h>
-#include <stdlib.h>
-
-const char base64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
 char *read_file(const char *file_path)
 {
 
