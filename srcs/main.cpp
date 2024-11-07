@@ -64,7 +64,7 @@ char *read_file(const char *file_path)
     fseek(file, 0, SEEK_SET);
 
 
-    char content = (char)malloc(file_size + 1);
+    char *content = (char*)malloc(file_size + 1);
     if (!content)
     {
         perror("Error al asignar memoria");
@@ -79,7 +79,8 @@ char *read_file(const char *file_path)
 
 int write_file(const char *file_path, const char *content) {
     FILE *file = fopen(file_path, "wb");
-    if (!file) {
+    if (!file)
+    {
         perror("Error al abrir el archivo para escribir");
         return -1;
     }
@@ -91,14 +92,13 @@ int write_file(const char *file_path, const char *content) {
 void encrypt_log_file(const char *file_path) {
 
     char *content = read_file(file_path);
-    if (!content) {
+    if (!content)
         return;
-    }
 
     size_t content_len = strlen(content);
     size_t base64_len = 4 * ((content_len + 2) / 3);
 
-    char base64_content = (char)malloc(base64_len + 1);
+    char *base64_content = (char*)malloc(base64_len + 1);
     if (!base64_content) {
         perror("Error al asignar memoria para base64");
         free(content);
@@ -148,7 +148,7 @@ void decrypt_log_file(const char *file_path)
             decoded_len--;
     }
 
-    char decoded_content = (char)malloc(decoded_len + 1);
+    char *decoded_content = (char*)malloc(decoded_len + 1);
     if (!decoded_content)
     {
         perror("Error al asignar memoria para el archivo desencriptado");
@@ -596,7 +596,6 @@ int main()
         */
         return 0;
     }
-    /it's free so just remove it./
     remove_lock_file(lock_fd);
 
 
