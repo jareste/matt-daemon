@@ -24,6 +24,8 @@
 #define SERVICE_PATH_SYSTEMD "/etc/systemd/system/matt-daemon.service" 
 #define SERVICE_PATH_SYSVINIT "/etc/init.d/matt-daemon"
 #define LOG_FILE_FOLDER "/var/log/matt-daemon/"
+#define LOG_FILE_FOLDER_REMOVE "/var/log/matt-daemon/*"
+#define LOG_FILE "/var/log/matt-daemon/matt_daemon.log"
 #define HELP "\
 Help Menu:\n\
 ? - Shows help menu\n\
@@ -39,6 +41,159 @@ available - Shows the number of available connections\n"
 using milu = Tintin_reporter;
 
 static int server_running = 0;
+static int is_encrypted = 0;
+static int g_log_num = 1;
+
+#include <stdio.h>
+#include <stdlib.h>
+
+const char base64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+char *read_file(const char *file_path)
+{
+
+    FILE *file = fopen(file_path, "rb");
+    if (!file)
+    {
+        perror("Error al abrir el archivo para leer");
+        return NULL;
+    }
+
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+
+    char content = (char)malloc(file_size + 1);
+    if (!content)
+    {
+        perror("Error al asignar memoria");
+        fclose(file);
+        return NULL;
+    }
+    fread(content, 1, file_size, file);
+    content[file_size] = '\0';
+    fclose(file);
+    return content;
+}
+
+int write_file(const char *file_path, const char *content) {
+    FILE *file = fopen(file_path, "wb");
+    if (!file) {
+        perror("Error al abrir el archivo para escribir");
+        return -1;
+    }
+    fwrite(content, 1, strlen(content), file);
+    fclose(file);
+    return 0;
+}
+
+void encrypt_log_file(const char *file_path) {
+
+    char *content = read_file(file_path);
+    if (!content) {
+        return;
+    }
+
+    size_t content_len = strlen(content);
+    size_t base64_len = 4 * ((content_len + 2) / 3);
+
+    char base64_content = (char)malloc(base64_len + 1);
+    if (!base64_content) {
+        perror("Error al asignar memoria para base64");
+        free(content);
+        return;
+    }
+
+    size_t index = 0;
+    const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t i = 0;
+    while (i < content_len)
+    {
+        uint32_t octet_a = i < content_len ? (unsigned char)content[i++] : 0;
+        uint32_t octet_b = i < content_len ? (unsigned char)content[i++] : 0;
+        uint32_t octet_c = i < content_len ? (unsigned char)content[i++] : 0;
+
+        uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
+
+        base64_content[index++] = base64_chars[(triple >> 18) & 0x3F];
+        base64_content[index++] = base64_chars[(triple >> 12) & 0x3F];
+        base64_content[index++] = base64_chars[(triple >> 6) & 0x3F];
+        base64_content[index++] = base64_chars[triple & 0x3F];
+    }
+    for (size_t j = 0; j < (base64_len - index); ++j)
+        base64_content[index + j] = '=';
+
+    base64_content[base64_len] = '\0';
+    if (write_file(file_path, base64_content) == -1)
+        perror("Error al escribir el archivo encriptado");
+
+    free(content);
+    free(base64_content);
+
+}
+
+void decrypt_log_file(const char *file_path)
+{
+    char *content = read_file(file_path);
+    if (!content)
+        return;
+
+    size_t content_len = strlen(content);
+    size_t decoded_len = content_len * 3 / 4;
+    if (content[content_len - 1] == '=')
+    {
+        decoded_len--;
+        if (content[content_len - 2] == '=')
+            decoded_len--;
+    }
+
+    char decoded_content = (char)malloc(decoded_len + 1);
+    if (!decoded_content)
+    {
+        perror("Error al asignar memoria para el archivo desencriptado");
+        free(content);
+        return;
+    }
+
+    size_t i = 0;
+    size_t j = 0;
+    while (i < content_len)
+    {
+        uint32_t triple = 0;
+        for (int k = 0; k < 4; k++)
+        {
+            triple <<= 6;
+            if (content[i] >= 'A' && content[i] <= 'Z')
+                triple |= content[i] - 'A';
+            else if (content[i] >= 'a' && content[i] <= 'z')
+                triple |= content[i] - 'a' + 26;
+            else if (content[i] >= '0' && content[i] <= '9')
+                triple |= content[i] - '0' + 52;
+            else if (content[i] == '+')
+                triple |= 62;
+            else if (content[i] == '/')
+                triple |= 63;
+            else if (content[i] == '=')
+                triple |= 0;
+            i++;
+        }
+
+        decoded_content[j++] = (triple >> 16) & 0xFF;
+        if (i < content_len)
+            decoded_content[j++] = (triple >> 8) & 0xFF;
+        if (i < content_len)
+            decoded_content[j++] = triple & 0xFF;
+    }
+
+    decoded_content[decoded_len] = '\0';
+
+    if (write_file(file_path, decoded_content) == -1)
+        perror("Error al escribir el archivo desencriptado");
+
+    free(content);
+    free(decoded_content);
+}
 
 int use_systemd()
 {
@@ -242,6 +397,12 @@ void handle_client_input(int* client_socket)
 
     buffer[bytes_received - 1] = '\0';
 
+    if (is_encrypted && strcmp(buffer, "save") != 0 && strcmp(buffer, "decrypt") != 0)
+    {
+        is_encrypted = 0;
+        decrypt_log_file(LOG_FILE);
+    }
+
     if (strcmp(buffer, "quit") == 0)
     {
         send(*client_socket, "Stoping service...\n", strlen("Stoping service...\n"), 0);
@@ -260,6 +421,36 @@ void handle_client_input(int* client_socket)
         {
             system("service matt-daemon stop");
         }
+    }
+    else if (strcmp(buffer, "encrypt") == 0 && is_encrypted == 0)
+    {
+        is_encrypted = 1;
+        encrypt_log_file(LOG_FILE);
+        send(*client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
+    }
+    else if (strcmp(buffer, "decrypt") == 0)
+    {
+        if (is_encrypted)
+        {
+            is_encrypted = 0;
+            decrypt_log_file(LOG_FILE);
+            send(*client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
+        }
+    }
+    else if (strcmp(buffer, "clear-all") == 0)
+    {   
+        g_log_num = 1;
+        system("rm -rf " LOG_FILE_FOLDER_REMOVE);
+        send(*client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
+    }
+    else if (strcmp(buffer, "save") == 0)
+    {
+        char system_instruction[150] = {0};
+
+        sprintf(system_instruction, "mv %s %s_%d", LOG_FILE, LOG_FILE, g_log_num);
+        g_log_num++;
+        system(system_instruction);
+        send(*client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
     }
     else
     {
@@ -405,7 +596,7 @@ int main()
         */
         return 0;
     }
-    /*it's free so just remove it.*/
+    /it's free so just remove it./
     remove_lock_file(lock_fd);
 
 
