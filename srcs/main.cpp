@@ -187,7 +187,7 @@ int use_systemd()
     return access("/run/systemd/system", F_OK) == 0;
 }
 
-int create_lock_file()
+int create_lock_file(int log)
 {
     int lock_fd = open(LOCK_FILE_PATH, O_CREAT | O_RDWR, 0644);
     if (lock_fd < 0)
@@ -206,9 +206,12 @@ int create_lock_file()
     char pid_str[16];
     snprintf(pid_str, sizeof(pid_str), "%d\n", getpid());
 
-    char pid_str_str[32];
-    snprintf(pid_str_str, sizeof(pid_str_str), "Starting... PID: %d", getpid());
-    SEND_UNSAFE_MSG(pid_str_str, LOG_INFO);
+    if (log == 1)
+    {
+        char pid_str_str[32];
+        snprintf(pid_str_str, sizeof(pid_str_str), "Starting... PID: %d", getpid());
+        SEND_UNSAFE_MSG(pid_str_str, LOG_INFO);
+    }    
     write(lock_fd, pid_str, strlen(pid_str));
 
     return lock_fd;
@@ -369,7 +372,7 @@ int handle_client(int client_socket, const char* client_ip)
 {
     char buffer[BUFFER_SIZE];
 
-    snprintf(buffer, sizeof(buffer), "Connection from %s received.\n", client_ip);
+    snprintf(buffer, sizeof(buffer), "Connection from %s received.", client_ip);
 
     SEND_SAFE_MSG(buffer, LOG_INFO);
     memset(buffer, 0, sizeof(buffer));
@@ -381,13 +384,13 @@ int handle_client(int client_socket, const char* client_ip)
         {
             if (bytes_received == 0)
             {
-                snprintf(buffer, sizeof(buffer), "Connection closed by client %s .\n", client_ip);
+                snprintf(buffer, sizeof(buffer), "Connection closed by client %s .", client_ip);
                 SEND_SAFE_MSG(buffer, LOG_INFO);
 
             }
             else
             {
-                snprintf(buffer, sizeof(buffer), "Unknown error on client %s . Closing connection\n", client_ip);
+                snprintf(buffer, sizeof(buffer), "Unknown error on client %s . Closing connection", client_ip);
                 SEND_SAFE_MSG(buffer, LOG_ERROR);
             }
             close(client_socket);
@@ -494,15 +497,13 @@ int daemon_main()
 
     server_socket = setup_server_socket();
 
-    fprintf(stderr, "creating semaphores\n");
     sem_init(&sem, 0, 3);
     sem_init(&sem_write, 0, 1);
     sem_init(&sem_encrypt, 0, 1);
 
-    int lock_fd = create_lock_file();
+    int lock_fd = create_lock_file(1);
     if (lock_fd < 0)
     {
-        fprintf(stderr, "Failed to create lock file.\n");
         SEND_SAFE_MSG("Failed to create lock file. Another instance potentially trying to run.", LOG_ERROR);
         close(server_socket);
         return -1;
@@ -515,7 +516,6 @@ int daemon_main()
 
     server_running = 1;
 
-    fprintf(stderr, "Entering loop.\n");
     while (server_running)
     {
         sem_wait(&sem);
@@ -523,7 +523,7 @@ int daemon_main()
         client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_addr_size);
         if (client_socket == -1)
         {
-            SEND_SAFE_MSG("Incomming connection refused due to: Accept Failed.\n", LOG_ERROR);
+            SEND_SAFE_MSG("Incomming connection refused due to: Accept Failed.", LOG_ERROR);
 
             sem_post(&sem);
             continue;
@@ -558,7 +558,6 @@ int main()
         return -1;
     }
 
-    printf("matt-daemon: Starting daemon...\n");
     int lock_fd;
     char exec_path[1024];
     ssize_t len = readlink("/proc/self/exe", exec_path, sizeof(exec_path) - 1);
@@ -569,21 +568,17 @@ int main()
     }
     else
     {
-        fprintf(stderr, "matt-daemon: Fatal error. Failed to read execution path\n");
-        perror("Failed to read execution path");
+        fprintf(stderr, "matt-daemon: Fatal error. Failed to read execution path.\n");
         return -1;
     }
 
-    printf("matt-daemon: Execution path: %s\n", exec_path);
-
     if (strcmp(exec_path, TARGET_PATH) == 0)
     {
-        printf("matt-daemon: Running from target path.\n");
         goto daemon_setup;
     }
 
 
-    lock_fd = create_lock_file();
+    lock_fd = create_lock_file(0);
     if (lock_fd < 0)
     {
         fprintf(stderr, "Failed to create lock file.\n");
@@ -606,19 +601,17 @@ daemon_setup:
 
     if (pid > 0) return 0;
 
-    fprintf(stderr, "matt-daemon: Daemon started.\n");
+    umask(0);
+    chdir("/");
 
-    // umask(0);
-    // chdir("/");
+    for (int x = sysconf(_SC_OPEN_MAX); x >= 0; x--)
+        close(x);
 
-    // for (int x = sysconf(_SC_OPEN_MAX); x >= 0; x--)
-    //     close(x);
+    open("/dev/null", O_RDWR);
+    dup(0);
+    dup(0);
 
-    // open("/dev/null", O_RDWR);
-    // dup(0);
-    // dup(0);
-
-    // prctl(PR_SET_PDEATHSIG, SIGKILL);
+    prctl(PR_SET_PDEATHSIG, SIGKILL);
 
     daemon_main();
 
