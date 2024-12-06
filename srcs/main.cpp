@@ -26,6 +26,7 @@
 #define LOG_FILE_FOLDER "/var/log/matt-daemon/"
 #define LOG_FILE_FOLDER_REMOVE "/var/log/matt-daemon/*"
 #define LOG_FILE "/var/log/matt-daemon/matt_daemon.log"
+#define LOCK_FILE_PATH "/var/lock/matt_daemon.lock"
 #define HELP "\
 Help Menu:\n\
 ? - Shows help menu\n\
@@ -45,6 +46,13 @@ available - Shows the number of available connections\n"
 #define SEND_MSG_END    sem_post(sem_write);
 
 #define SEND_SAFE_MSG(x,y) sem_wait(&sem_write); milu::log_message(x, y); sem_post(&sem_write);
+/*
+ * Unsafe should not be used never, but we assume that there will not be
+ * any concurrency issues in this case. And, if there are, it is not a big deal.
+ */
+#define SEND_UNSAFE_MSG(x,y) milu::log_message(x, y);
+
+#define CHILD_EXIT_CODE_EXIT 42
 
 using milu = Tintin_reporter;
 
@@ -211,7 +219,7 @@ int use_systemd()
 
 int create_lock_file()
 {
-    int lock_fd = open("/var/lock/matt_daemon.lock", O_CREAT | O_RDWR, 0644);
+    int lock_fd = open(LOCK_FILE_PATH, O_CREAT | O_RDWR, 0644);
     if (lock_fd < 0)
     {
         perror("Failed to create/open lock file");
@@ -220,8 +228,7 @@ int create_lock_file()
 
     if (flock(lock_fd, LOCK_EX | LOCK_NB) != 0)
     {
-        perror("Error: Another instance of Matt_daemon is already running");
-        milu::log_message("Error: Another instance of Matt_daemon is already running", LOG_ERROR);
+        SEND_UNSAFE_MSG("Error: Another instance of Matt_daemon is already running", LOG_ERROR);
         close(lock_fd);
         return -1;
     }
@@ -231,7 +238,7 @@ int create_lock_file()
 
     char pid_str_str[32];
     snprintf(pid_str_str, sizeof(pid_str_str), "Starting... PID: %d", getpid());
-    milu::log_message(pid_str_str, LOG_INFO);
+    SEND_UNSAFE_MSG(pid_str_str, LOG_INFO);
     write(lock_fd, pid_str, strlen(pid_str));
 
     return lock_fd;
@@ -388,13 +395,13 @@ int setup_server_socket()
     return server_socket;
 }
 
-void handle_client(int client_socket, const char* client_ip)
+int handle_client(int client_socket, const char* client_ip)
 {
     char buffer[BUFFER_SIZE];
 
     snprintf(buffer, sizeof(buffer), "Connection from %s received.\n", client_ip);
 
-    milu::log_message(buffer, LOG_INFO);
+    SEND_SAFE_MSG(buffer, LOG_INFO);
     memset(buffer, 0, sizeof(buffer));
 
     while (1)
@@ -434,6 +441,7 @@ void handle_client(int client_socket, const char* client_ip)
             close(client_socket);
             client_socket = 0;
             server_running = 0;
+            return CHILD_EXIT_CODE_EXIT;
 
             // if (use_systemd())
             // {
@@ -477,17 +485,22 @@ void handle_client(int client_socket, const char* client_ip)
         else
         {
             SEND_SAFE_MSG(buffer, LOG_USER);
-            // milu::log_message(buffer, LOG_USER);
             send(client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
         }
     }
+    return EXIT_SUCCESS;
 }
 
 void handle_sigchld(int sig)
 {
     (void)sig;
-    while (waitpid(-1, NULL, WNOHANG) > 0)
+    int status;
+    while (waitpid(-1, &status, WNOHANG) > 0)
     {
+        if (WIFEXITED(status) && WEXITSTATUS(status) == CHILD_EXIT_CODE_EXIT)
+        {
+            server_running = 0;
+        }
         sem_post(&sem);
     }
 }
@@ -508,11 +521,10 @@ int daemon_main()
     if (lock_fd < 0)
     {
         fprintf(stderr, "Failed to create lock file.\n");
-        milu::log_message("Failed to create lock file. Another instance potentially trying to run.", LOG_ERROR);
+        SEND_SAFE_MSG("Failed to create lock file. Another instance potentially trying to run.", LOG_ERROR);
         close(server_socket);
         return -1;
     }
-    // milu::log_message("Daemon started.", LOG_INFO);
 
     struct sigaction sa;
     sa.sa_handler = handle_sigchld;
@@ -527,7 +539,7 @@ int daemon_main()
         client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_addr_size);
         if (client_socket == -1)
         {
-            milu::log_message("Incomming connection refused due to: Accept Failed.\n", LOG_ERROR);
+            SEND_SAFE_MSG("Incomming connection refused due to: Accept Failed.\n", LOG_ERROR);
 
             sem_post(&sem);
             continue;
@@ -537,17 +549,19 @@ int daemon_main()
             char client_ip[INET_ADDRSTRLEN];
             inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
 
-            handle_client(client_socket, client_ip);
+            int foo = handle_client(client_socket, client_ip);
             close(server_socket);
-            exit(EXIT_SUCCESS);
+            exit(foo);
         }
+        close(client_socket);
     }
 
-    milu::log_message("Daemon stopped.", LOG_INFO);
+    SEND_SAFE_MSG("Daemon stopped.", LOG_INFO);
 
     remove_lock_file(lock_fd);
     sem_destroy(&sem);
     sem_destroy(&sem_write);
+    close(lock_fd);
     close(server_socket);
     return 0;
 }
@@ -584,7 +598,7 @@ int main()
         goto daemon_setup;
     }
 
-    printf("matt-daemon: Daemon already installed.\n");
+
     lock_fd = create_lock_file();
     if (lock_fd < 0)
     {
