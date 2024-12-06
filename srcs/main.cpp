@@ -38,11 +38,22 @@ available - Shows the number of available connections\n"
 #define MAX_CLIENTS 3
 #define BUFFER_SIZE 4096
 
+#define SEM_NAME "/matias_el_semaforos"
+#define SEM_WRITE_NAME "/matias_el_semaforos_write"
+
+#define SEND_MSG_START  sem_wait(sem_write);
+#define SEND_MSG_END    sem_post(sem_write);
+
+#define SEND_SAFE_MSG(x,y) sem_wait(&sem_write); milu::log_message(x, y); sem_post(&sem_write);
+
 using milu = Tintin_reporter;
 
 static int server_running = 0;
 static int is_encrypted = 0;
 static int g_log_num = 1;
+
+sem_t sem;
+sem_t sem_write;
 
 char *read_file(const char *file_path)
 {
@@ -72,7 +83,8 @@ char *read_file(const char *file_path)
     return content;
 }
 
-int write_file(const char *file_path, const char *content) {
+int write_file(const char *file_path, const char *content)
+{
     FILE *file = fopen(file_path, "wb");
     if (!file)
     {
@@ -84,7 +96,8 @@ int write_file(const char *file_path, const char *content) {
     return 0;
 }
 
-void encrypt_log_file(const char *file_path) {
+void encrypt_log_file(const char *file_path)
+{
 
     char *content = read_file(file_path);
     if (!content)
@@ -94,7 +107,8 @@ void encrypt_log_file(const char *file_path) {
     size_t base64_len = 4 * ((content_len + 2) / 3);
 
     char *base64_content = (char*)malloc(base64_len + 1);
-    if (!base64_content) {
+    if (!base64_content)
+    {
         perror("Error al asignar memoria para base64");
         free(content);
         return;
@@ -339,8 +353,10 @@ int setup_server_socket()
     int server_socket;
     struct sockaddr_in server_addr;
 
+    fprintf(stderr, "Setting up server socket.\n");
     if ((server_socket = socket(AF_INET, SOCK_STREAM, 0)) == -1)
     {
+        fprintf(stderr, "Socket failed\n");
         perror("Socket failed");
         exit(EXIT_FAILURE);
     }
@@ -354,6 +370,7 @@ int setup_server_socket()
 
     if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1)
     {
+        fprintf(stderr, "Bind failed\n");
         perror("Bind failed");
         close(server_socket);
         exit(EXIT_FAILURE);
@@ -361,108 +378,131 @@ int setup_server_socket()
 
     if (listen(server_socket, MAX_CLIENTS) == -1)
     {
+        fprintf(stderr, "Listen failed\n");
         perror("Listen failed");
         close(server_socket);
         exit(EXIT_FAILURE);
     }
 
+    fprintf(stderr, "Server socket setup complete.\n");
     return server_socket;
 }
 
-void handle_client_input(int* client_socket)
+void handle_client(int client_socket, const char* client_ip)
 {
     char buffer[BUFFER_SIZE];
-    int bytes_received = recv(*client_socket, buffer, sizeof(buffer) - 1, 0);
 
-    if (bytes_received <= 0)
+    snprintf(buffer, sizeof(buffer), "Connection from %s received.\n", client_ip);
+
+    milu::log_message(buffer, LOG_INFO);
+    memset(buffer, 0, sizeof(buffer));
+
+    while (1)
     {
-        if (bytes_received == 0)
+        int bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
+        if (bytes_received <= 0)
         {
-            milu::log_message("Connection closed by client.", LOG_INFO);
-            printf("Connection closed by client.\n");
+            if (bytes_received == 0)
+            {
+                snprintf(buffer, sizeof(buffer), "Connection closed by client %s.\n", client_ip);
+                SEND_SAFE_MSG(buffer, LOG_INFO);
+
+            }
+            else
+            {
+                snprintf(buffer, sizeof(buffer), "Unknown error on client %s. Closing connection\n", client_ip);
+                SEND_SAFE_MSG(buffer, LOG_ERROR);
+            }
+            close(client_socket);
+            client_socket = 0;
+            break;
         }
-        else
-        {
-            perror("recv");
-        }
-        close(*client_socket);
-        *client_socket = 0;
-        return;
-    }
 
-    buffer[bytes_received - 1] = '\0';
+        buffer[bytes_received - 1] = '\0';
 
-    if (is_encrypted && strcmp(buffer, "save") != 0 && strcmp(buffer, "decrypt") != 0)
-    {
-        is_encrypted = 0;
-        decrypt_log_file(LOG_FILE);
-    }
-
-    if (strcmp(buffer, "quit") == 0)
-    {
-        send(*client_socket, "Stoping service...\n", strlen("Stoping service...\n"), 0);
-        
-        milu::log_message("Service quit requested.", LOG_INFO);
-
-        close(*client_socket);
-        *client_socket = 0;
-        server_running = 0;
-
-        if (use_systemd())
-        {
-            system("systemctl stop matt-daemon");
-        }
-        else
-        {
-            system("service matt-daemon stop");
-        }
-    }
-    else if (strcmp(buffer, "encrypt") == 0 && is_encrypted == 0)
-    {
-        is_encrypted = 1;
-        encrypt_log_file(LOG_FILE);
-        send(*client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
-    }
-    else if (strcmp(buffer, "decrypt") == 0)
-    {
-        if (is_encrypted)
+        if (is_encrypted && strcmp(buffer, "save") != 0 && strcmp(buffer, "decrypt") != 0)
         {
             is_encrypted = 0;
             decrypt_log_file(LOG_FILE);
-            send(*client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
+        }
+
+        if (strcmp(buffer, "quit") == 0)
+        {
+            send(client_socket, "Stoping service...\n", strlen("Stoping service...\n"), 0);
+            SEND_SAFE_MSG("Service quit requested.", LOG_INFO);
+
+            close(client_socket);
+            client_socket = 0;
+            server_running = 0;
+
+            // if (use_systemd())
+            // {
+            //     system("systemctl stop matt-daemon");
+            // }
+            // else
+            // {
+            //     system("service matt-daemon stop");
+            // }
+        }
+        else if (strcmp(buffer, "encrypt") == 0 && is_encrypted == 0)
+        {
+            is_encrypted = 1;
+            encrypt_log_file(LOG_FILE);
+            send(client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
+        }
+        else if (strcmp(buffer, "decrypt") == 0)
+        {
+            if (is_encrypted)
+            {
+                is_encrypted = 0;
+                decrypt_log_file(LOG_FILE);
+                send(client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
+            }
+        }
+        else if (strcmp(buffer, "clear-all") == 0)
+        {   
+            // g_log_num = 1;
+            system("rm -rf " LOG_FILE_FOLDER_REMOVE);
+            send(client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
+        }
+        else if (strcmp(buffer, "save") == 0)
+        {
+            char system_instruction[150] = {0};
+
+            sprintf(system_instruction, "mv %s %s_%d", LOG_FILE, LOG_FILE, g_log_num);
+            g_log_num++;
+            system(system_instruction);
+            send(client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
+        }
+        else
+        {
+            SEND_SAFE_MSG(buffer, LOG_USER);
+            // milu::log_message(buffer, LOG_USER);
+            send(client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
         }
     }
-    else if (strcmp(buffer, "clear-all") == 0)
-    {   
-        g_log_num = 1;
-        system("rm -rf " LOG_FILE_FOLDER_REMOVE);
-        send(*client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
-    }
-    else if (strcmp(buffer, "save") == 0)
-    {
-        char system_instruction[150] = {0};
+}
 
-        sprintf(system_instruction, "mv %s %s_%d", LOG_FILE, LOG_FILE, g_log_num);
-        g_log_num++;
-        system(system_instruction);
-        send(*client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
-    }
-    else
+void handle_sigchld(int sig)
+{
+    (void)sig;
+    while (waitpid(-1, NULL, WNOHANG) > 0)
     {
-        milu::log_message(buffer, LOG_USER);
-        send(*client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
+        sem_post(&sem);
     }
 }
 
 int daemon_main()
 {
-    int server_socket = setup_server_socket();
-    fd_set active_fds, read_fds;
-    int client_sockets[MAX_CLIENTS] = {0};
+    int server_socket, client_socket;    
+    struct sockaddr_in client_addr;
+    socklen_t client_addr_size = sizeof(client_addr);
 
-    FD_ZERO(&active_fds);
-    FD_SET(server_socket, &active_fds);
-    int max_fd = server_socket;
+    server_socket = setup_server_socket();
+
+    fprintf(stderr, "creating semaphores\n");
+    sem_init(&sem, 0, 3);
+    sem_init(&sem_write, 0, 1);
 
     int lock_fd = create_lock_file();
     if (lock_fd < 0)
@@ -474,76 +514,40 @@ int daemon_main()
     }
     // milu::log_message("Daemon started.", LOG_INFO);
 
-    server_running = 1;
+    struct sigaction sa;
+    sa.sa_handler = handle_sigchld;
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa, NULL);
 
-    while (server_running)
+    fprintf(stderr, "Entering loop.\n");
+    while (1)
     {
-        read_fds = active_fds;
+        sem_wait(&sem);
 
-        if (select(max_fd + 1, &read_fds, NULL, NULL, NULL) < 0)
+        client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_addr_size);
+        if (client_socket == -1)
         {
-            // milu::log_message("Daemon error.", LOG_ERROR);
-            /*
-                We should never close connection, select failed?
-                Unlucky, maybe next time we'll have better luck.
-            */
+            milu::log_message("Incomming connection refused due to: Accept Failed.\n", LOG_ERROR);
+
+            sem_post(&sem);
             continue;
         }
-
-        if (FD_ISSET(server_socket, &read_fds))
+        if (fork() == 0)
         {
-            struct sockaddr_in client_addr;
-            socklen_t addrlen = sizeof(client_addr);
-            int new_socket = accept(server_socket, (struct sockaddr *)&client_addr, &addrlen);
-            if (new_socket < 0)
-            {
-                perror("accept");
-                continue;
-            }
+            char client_ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
 
-            milu::log_message("New connection accepted.", LOG_INFO);
-
-            for (int i = 0; i < MAX_CLIENTS; i++)
-            {
-                if (client_sockets[i] == 0)
-                {
-                    client_sockets[i] = new_socket;
-                    FD_SET(new_socket, &active_fds);
-                    if (new_socket > max_fd)
-                    {
-                        max_fd = new_socket;
-                    }
-                    break;
-                }
-            }
-        }
-
-        for (int i = 0; i < MAX_CLIENTS; i++)
-        {
-            int client_socket = client_sockets[i];
-            if (client_socket > 0 && FD_ISSET(client_socket, &read_fds))
-            {
-                handle_client_input(&client_socket);
-                if (client_socket == 0)
-                {
-                    FD_CLR(client_sockets[i], &active_fds);
-                    client_sockets[i] = 0;
-                }
-            }
-        }
-    }
-
-    for (int i = 0; i < MAX_CLIENTS; i++)
-    {
-        if (client_sockets[i] > 0)
-        {
-            close(client_sockets[i]);
+            handle_client(client_socket, client_ip);
+            close(server_socket);
+            exit(EXIT_SUCCESS);
         }
     }
 
     milu::log_message("Daemon stopped.", LOG_INFO);
 
     remove_lock_file(lock_fd);
+    sem_destroy(&sem);
+    sem_destroy(&sem_write);
     close(server_socket);
     return 0;
 }
@@ -556,8 +560,8 @@ int main()
         return -1;
     }
 
-    int systemd_enabled = use_systemd();
-
+    printf("matt-daemon: Starting daemon...\n");
+    int lock_fd;
     char exec_path[1024];
     ssize_t len = readlink("/proc/self/exe", exec_path, sizeof(exec_path) - 1);
 
@@ -572,36 +576,54 @@ int main()
         return -1;
     }
 
-    /*
-        We asume it's being executed by service handler.
-    */
+    printf("matt-daemon: Execution path: %s\n", exec_path);
+
     if (strcmp(exec_path, TARGET_PATH) == 0)
     {
-        daemon_main();
-        return 0;
+        printf("matt-daemon: Running from target path.\n");
+        goto daemon_setup;
     }
 
-
-    int lock_fd = create_lock_file();
+    printf("matt-daemon: Daemon already installed.\n");
+    lock_fd = create_lock_file();
     if (lock_fd < 0)
     {
         fprintf(stderr, "Failed to create lock file.\n");
-        /* NOT AN ERROR!!
-            We are not in the service execution path.
-        */
         return 0;
     }
     remove_lock_file(lock_fd);
 
+daemon_setup:
+    pid_t pid = fork();
 
-    if (access(TARGET_PATH, F_OK) != 0)
-    {
-        copy_to_standard_location();
-    }
+    if (pid < 0) return 1;
 
-    create_service_file(systemd_enabled);
+    if (pid > 0) return 0;
 
-    setup_service(systemd_enabled);
+    if (setsid() < 0) { open("/mnt/Documents/matt-daemon/foo", O_CREAT); return 1; }
+
+    pid = fork();
+
+    if (pid < 0) return 1;
+
+    if (pid > 0) return 0;
+
+    fprintf(stderr, "matt-daemon: Daemon started.\n");
+
+    // umask(0);
+    // chdir("/");
+
+    // for (int x = sysconf(_SC_OPEN_MAX); x >= 0; x--)
+    //     close(x);
+
+    // open("/dev/null", O_RDWR);
+    // dup(0);
+    // dup(0);
+
+    // prctl(PR_SET_PDEATHSIG, SIGKILL);
+
+    fprintf(stderr, "matt-daemon: Starting main.\n");
+    daemon_main();
 
     return 0;
 }
