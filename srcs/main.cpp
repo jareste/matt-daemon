@@ -56,35 +56,24 @@ available - Shows the number of available connections\n"
 
 using milu = Tintin_reporter;
 
-static int server_running = 0;
-static int is_encrypted = 0;
-static int g_log_num = 1;
+static int server_running;
 
 sem_t sem;
 sem_t sem_write;
+sem_t sem_encrypt;
 
 char *read_file(const char *file_path)
 {
 
     FILE *file = fopen(file_path, "rb");
-    if (!file)
-    {
-        perror("Error al abrir el archivo para leer");
-        return NULL;
-    }
+    if (!file) return NULL;
 
     fseek(file, 0, SEEK_END);
     long file_size = ftell(file);
     fseek(file, 0, SEEK_SET);
 
-
     char *content = (char*)malloc(file_size + 1);
-    if (!content)
-    {
-        perror("Error al asignar memoria");
-        fclose(file);
-        return NULL;
-    }
+    
     fread(content, 1, file_size, file);
     content[file_size] = '\0';
     fclose(file);
@@ -94,11 +83,8 @@ char *read_file(const char *file_path)
 int write_file(const char *file_path, const char *content)
 {
     FILE *file = fopen(file_path, "wb");
-    if (!file)
-    {
-        perror("Error al abrir el archivo para escribir");
-        return -1;
-    }
+    if (!file) return -1;
+
     fwrite(content, 1, strlen(content), file);
     fclose(file);
     return 0;
@@ -106,7 +92,6 @@ int write_file(const char *file_path, const char *content)
 
 void encrypt_log_file(const char *file_path)
 {
-
     char *content = read_file(file_path);
     if (!content)
         return;
@@ -115,13 +100,7 @@ void encrypt_log_file(const char *file_path)
     size_t base64_len = 4 * ((content_len + 2) / 3);
 
     char *base64_content = (char*)malloc(base64_len + 1);
-    if (!base64_content)
-    {
-        perror("Error al asignar memoria para base64");
-        free(content);
-        return;
-    }
-
+ 
     size_t index = 0;
     const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     size_t i = 0;
@@ -142,12 +121,10 @@ void encrypt_log_file(const char *file_path)
         base64_content[index + j] = '=';
 
     base64_content[base64_len] = '\0';
-    if (write_file(file_path, base64_content) == -1)
-        perror("Error al escribir el archivo encriptado");
-
+    write_file(file_path, base64_content);
+ 
     free(content);
     free(base64_content);
-
 }
 
 void decrypt_log_file(const char *file_path)
@@ -166,12 +143,6 @@ void decrypt_log_file(const char *file_path)
     }
 
     char *decoded_content = (char*)malloc(decoded_len + 1);
-    if (!decoded_content)
-    {
-        perror("Error al asignar memoria para el archivo desencriptado");
-        free(content);
-        return;
-    }
 
     size_t i = 0;
     size_t j = 0;
@@ -205,8 +176,7 @@ void decrypt_log_file(const char *file_path)
 
     decoded_content[decoded_len] = '\0';
 
-    if (write_file(file_path, decoded_content) == -1)
-        perror("Error al escribir el archivo desencriptado");
+    write_file(file_path, decoded_content);
 
     free(content);
     free(decoded_content);
@@ -411,13 +381,13 @@ int handle_client(int client_socket, const char* client_ip)
         {
             if (bytes_received == 0)
             {
-                snprintf(buffer, sizeof(buffer), "Connection closed by client %s.\n", client_ip);
+                snprintf(buffer, sizeof(buffer), "Connection closed by client %s .\n", client_ip);
                 SEND_SAFE_MSG(buffer, LOG_INFO);
 
             }
             else
             {
-                snprintf(buffer, sizeof(buffer), "Unknown error on client %s. Closing connection\n", client_ip);
+                snprintf(buffer, sizeof(buffer), "Unknown error on client %s . Closing connection\n", client_ip);
                 SEND_SAFE_MSG(buffer, LOG_ERROR);
             }
             close(client_socket);
@@ -427,10 +397,14 @@ int handle_client(int client_socket, const char* client_ip)
 
         buffer[bytes_received - 1] = '\0';
 
-        if (is_encrypted && strcmp(buffer, "save") != 0 && strcmp(buffer, "decrypt") != 0)
+        int sem_value;
+        sem_getvalue(&sem_encrypt, &sem_value);
+
+        if (strcmp(buffer, "save") != 0 && sem_value == 0)
         {
-            is_encrypted = 0;
             decrypt_log_file(LOG_FILE);
+            sem_post(&sem_encrypt);
+            sem_getvalue(&sem_encrypt, &sem_value);
         }
 
         if (strcmp(buffer, "quit") == 0)
@@ -440,7 +414,6 @@ int handle_client(int client_socket, const char* client_ip)
 
             close(client_socket);
             client_socket = 0;
-            server_running = 0;
             return CHILD_EXIT_CODE_EXIT;
 
             // if (use_systemd())
@@ -452,35 +425,43 @@ int handle_client(int client_socket, const char* client_ip)
             //     system("service matt-daemon stop");
             // }
         }
-        else if (strcmp(buffer, "encrypt") == 0 && is_encrypted == 0)
+        else if (strcmp(buffer, "encrypt") == 0 && sem_value == 1)
         {
-            is_encrypted = 1;
             encrypt_log_file(LOG_FILE);
-            send(client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
+            sem_wait(&sem_encrypt);
+            send(client_socket, "Encrypted successfully.\n", strlen("Encrypted successfully.\n"), 0);
         }
         else if (strcmp(buffer, "decrypt") == 0)
         {
-            if (is_encrypted)
+            if (sem_value == 0)
             {
-                is_encrypted = 0;
-                decrypt_log_file(LOG_FILE);
-                send(client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
+                send(client_socket, "Log already decrypted.\n", strlen("Log already decrypted.\n"), 0);
+                continue;
             }
+            decrypt_log_file(LOG_FILE);
+            sem_post(&sem_encrypt);
+            send(client_socket, "Decrypted successfully.\n", strlen("Decrypted successfully.\n"), 0);
         }
         else if (strcmp(buffer, "clear-all") == 0)
-        {   
-            // g_log_num = 1;
+        {
             system("rm -rf " LOG_FILE_FOLDER_REMOVE);
-            send(client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
+            send(client_socket, "All logs removed.\n", strlen("All logs removed.\n"), 0);
         }
         else if (strcmp(buffer, "save") == 0)
         {
-            char system_instruction[150] = {0};
+            char system_instruction[300] = {0};
+            char new_log_file[200] = {0};
 
-            sprintf(system_instruction, "mv %s %s_%d", LOG_FILE, LOG_FILE, g_log_num);
-            g_log_num++;
+            time_t now = time(NULL);
+            struct tm *t = localtime(&now);
+            strftime(new_log_file, sizeof(new_log_file) - 1, "/var/log/matt-daemon/matt_daemon_%Y%m%d_%H%M%S.log", t);
+
+            sprintf(system_instruction, "mv %s %s", LOG_FILE, new_log_file);
             system(system_instruction);
-            send(client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
+
+            snprintf(buffer, sizeof(buffer), "File saved as %s\n", new_log_file);
+            sem_post(&sem_encrypt);
+            send(client_socket, buffer, strlen(buffer), 0);
         }
         else
         {
@@ -516,6 +497,7 @@ int daemon_main()
     fprintf(stderr, "creating semaphores\n");
     sem_init(&sem, 0, 3);
     sem_init(&sem_write, 0, 1);
+    sem_init(&sem_encrypt, 0, 1);
 
     int lock_fd = create_lock_file();
     if (lock_fd < 0)
@@ -531,8 +513,10 @@ int daemon_main()
     sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
     sigaction(SIGCHLD, &sa, NULL);
 
+    server_running = 1;
+
     fprintf(stderr, "Entering loop.\n");
-    while (1)
+    while (server_running)
     {
         sem_wait(&sem);
 
@@ -614,7 +598,7 @@ daemon_setup:
 
     if (pid > 0) return 0;
 
-    if (setsid() < 0) { open("/mnt/Documents/matt-daemon/foo", O_CREAT); return 1; }
+    if (setsid() < 0) return 1;
 
     pid = fork();
 
@@ -636,7 +620,6 @@ daemon_setup:
 
     // prctl(PR_SET_PDEATHSIG, SIGKILL);
 
-    fprintf(stderr, "matt-daemon: Starting main.\n");
     daemon_main();
 
     return 0;
