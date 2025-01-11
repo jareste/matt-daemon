@@ -8,6 +8,9 @@
 #include <QLineEdit>
 #include <QLabel>
 
+extern QString ip;
+extern int port;
+
 class Ben_AFK : public QWidget
 {
     Q_OBJECT

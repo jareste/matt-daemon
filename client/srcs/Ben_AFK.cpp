@@ -2,6 +2,9 @@
 #include <QHBoxLayout>
 #include <QMessageBox>
 
+QString ip;
+int port;
+
 Ben_AFK::Ben_AFK(QWidget *parent) : QWidget(parent), isConnected(false)
 {
     socket = new QTcpSocket(this);
@@ -45,7 +48,7 @@ void Ben_AFK::connectToDaemon()
 {
     if (!isConnected)
     {
-        socket->connectToHost("127.0.0.1", 4242);
+        socket->connectToHost(ip, port);
         if (socket->waitForConnected(3000))
         {
             isConnected = true;
