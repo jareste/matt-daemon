@@ -454,7 +454,7 @@ int handle_client(int client_socket, const char* client_ip)
         }
         else if (strcmp(buffer, "decrypt") == 0)
         {
-            if (sem_value == 0)
+            if (sem_value == 1)
             {
                 send(client_socket, "Log already decrypted.\n", strlen("Log already decrypted.\n"), 0);
                 continue;
