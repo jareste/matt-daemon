@@ -41,11 +41,12 @@ available - Shows the number of available connections\n"
 
 #define SEM_NAME "/matias_el_semaforos"
 #define SEM_WRITE_NAME "/matias_el_semaforos_write"
+#define SEM_ENCRYPT_NAME "/matias_el_semaforos_encrypt"
 
 #define SEND_MSG_START  sem_wait(sem_write);
 #define SEND_MSG_END    sem_post(sem_write);
 
-#define SEND_SAFE_MSG(x,y) sem_wait(&sem_write); milu::log_message(x, y); sem_post(&sem_write);
+#define SEND_SAFE_MSG(x,y) sem_wait(sem_write); milu::log_message(x, y); sem_post(sem_write);
 /*
  * Unsafe should not be used never, but we assume that there will not be
  * any concurrency issues in this case. And, if there are, it is not a big deal.
@@ -59,8 +60,8 @@ using milu = Tintin_reporter;
 static int server_running;
 
 sem_t sem;
-sem_t sem_write;
-sem_t sem_encrypt;
+sem_t *sem_write;
+sem_t *sem_encrypt;
 
 char *read_file(const char *file_path)
 {
@@ -198,7 +199,7 @@ int create_lock_file(int log)
 
     if (flock(lock_fd, LOCK_EX | LOCK_NB) != 0)
     {
-        SEND_UNSAFE_MSG("Error: Another instance of Matt_daemon is already running", LOG_ERROR);
+        SEND_UNSAFE_MSG("Error: Another instance of Matt_daemon tried to run", LOG_ERROR);
         close(lock_fd);
         return -1;
     }
@@ -401,13 +402,30 @@ int handle_client(int client_socket, const char* client_ip)
         buffer[bytes_received - 1] = '\0';
 
         int sem_value;
-        sem_getvalue(&sem_encrypt, &sem_value);
+        sem_getvalue(sem_encrypt, &sem_value);
+   
+        if (strcmp(buffer, "save") == 0)
+        {
+            char system_instruction[300] = {0};
+            char new_log_file[200] = {0};
 
-        if (strcmp(buffer, "save") != 0 && sem_value == 0)
+            time_t now = time(NULL);
+            struct tm *t = localtime(&now);
+            strftime(new_log_file, sizeof(new_log_file) - 1, "/var/log/matt-daemon/matt_daemon_%Y%m%d_%H%M%S.log", t);
+
+            sprintf(system_instruction, "mv %s %s", LOG_FILE, new_log_file);
+            system(system_instruction);
+
+            snprintf(buffer, sizeof(buffer), "File saved as %s\n", new_log_file);
+            sem_post(sem_encrypt);
+            send(client_socket, buffer, strlen(buffer), 0);
+            continue;
+        }
+        else if (sem_value == 0)
         {
             decrypt_log_file(LOG_FILE);
-            sem_post(&sem_encrypt);
-            sem_getvalue(&sem_encrypt, &sem_value);
+            sem_post(sem_encrypt);
+            sem_getvalue(sem_encrypt, &sem_value);
         }
 
         if (strcmp(buffer, "quit") == 0)
@@ -431,7 +449,7 @@ int handle_client(int client_socket, const char* client_ip)
         else if (strcmp(buffer, "encrypt") == 0 && sem_value == 1)
         {
             encrypt_log_file(LOG_FILE);
-            sem_wait(&sem_encrypt);
+            sem_wait(sem_encrypt);
             send(client_socket, "Encrypted successfully.\n", strlen("Encrypted successfully.\n"), 0);
         }
         else if (strcmp(buffer, "decrypt") == 0)
@@ -442,7 +460,7 @@ int handle_client(int client_socket, const char* client_ip)
                 continue;
             }
             decrypt_log_file(LOG_FILE);
-            sem_post(&sem_encrypt);
+            sem_post(sem_encrypt);
             send(client_socket, "Decrypted successfully.\n", strlen("Decrypted successfully.\n"), 0);
         }
         else if (strcmp(buffer, "clear-all") == 0)
@@ -450,28 +468,17 @@ int handle_client(int client_socket, const char* client_ip)
             system("rm -rf " LOG_FILE_FOLDER_REMOVE);
             send(client_socket, "All logs removed.\n", strlen("All logs removed.\n"), 0);
         }
-        else if (strcmp(buffer, "save") == 0)
-        {
-            char system_instruction[300] = {0};
-            char new_log_file[200] = {0};
-
-            time_t now = time(NULL);
-            struct tm *t = localtime(&now);
-            strftime(new_log_file, sizeof(new_log_file) - 1, "/var/log/matt-daemon/matt_daemon_%Y%m%d_%H%M%S.log", t);
-
-            sprintf(system_instruction, "mv %s %s", LOG_FILE, new_log_file);
-            system(system_instruction);
-
-            snprintf(buffer, sizeof(buffer), "File saved as %s\n", new_log_file);
-            sem_post(&sem_encrypt);
-            send(client_socket, buffer, strlen(buffer), 0);
-        }
         else
         {
             SEND_SAFE_MSG(buffer, LOG_USER);
             send(client_socket, "Log processed.\n", strlen("Log processed.\n"), 0);
         }
     }
+    sem_destroy(&sem);
+    sem_close(sem_write);
+    sem_close(sem_encrypt);
+    sem_unlink(SEM_ENCRYPT_NAME);
+    sem_unlink(SEM_WRITE_NAME);
     return EXIT_SUCCESS;
 }
 
@@ -498,8 +505,10 @@ int daemon_main()
     server_socket = setup_server_socket();
 
     sem_init(&sem, 0, 3);
-    sem_init(&sem_write, 0, 1);
-    sem_init(&sem_encrypt, 0, 1);
+    // sem_init(&sem_write, 0, 1);
+    // sem_init(&sem_encrypt, 0, 1);
+    sem_encrypt = sem_open(SEM_ENCRYPT_NAME, O_CREAT, 0644, 1);
+    sem_write = sem_open(SEM_WRITE_NAME, O_CREAT, 0644, 1);
 
     int lock_fd = create_lock_file(1);
     if (lock_fd < 0)
@@ -544,7 +553,10 @@ int daemon_main()
 
     remove_lock_file(lock_fd);
     sem_destroy(&sem);
-    sem_destroy(&sem_write);
+    sem_close(sem_write);
+    sem_close(sem_encrypt);
+    sem_unlink(SEM_ENCRYPT_NAME);
+    sem_unlink(SEM_WRITE_NAME);
     close(lock_fd);
     close(server_socket);
     return 0;
